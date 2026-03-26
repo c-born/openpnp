@@ -448,11 +448,17 @@ public class BlindsFeeder extends ReferenceFeeder {
     }
 
     private RegionOfInterest getOcrRegion(Camera camera) {
-        // By default we take the camera Y to define the ROI.  
-        Location[] cornerLocations = getOcrRegionCornerLocations(getPocketCenterline());
+        // Derive the pocket centerline from the current camera position so that the ROI
+        // tracks correctly when the camera is moved to a different slot before the pipeline
+        // is set up (e.g. when editing the pipeline with the camera over a different slot).
+        Location cameraLocation = camera.getLocation();
+        Location feederLocation = transformMachineToFeederLocation(cameraLocation)
+                .convertToUnits(LengthUnit.Millimeters);
+        Length dynamicCenterline = new Length(
+                Math.round(feederLocation.getY()), LengthUnit.Millimeters);
+        Location[] cornerLocations = getOcrRegionCornerLocations(dynamicCenterline);
         // Transform all into camera offset locations.
         int i = 0;
-        Location cameraLocation = camera.getLocation();
         Location [] cameraOffsets = new Location[cornerLocations.length];
         for (Location feederLocation1 : cornerLocations) {
             Location machineLocation = transformFeederToMachineLocation(feederLocation1);
@@ -463,13 +469,54 @@ public class BlindsFeeder extends ReferenceFeeder {
         return roi; 
     }
 
+    /**
+     * Returns tapeCenterOffsetMm with the correct sign for the current feeder orientation.
+     * When normalize=true the Y axis is always the CCW perpendicular to the tape direction,
+     * which loses handedness information. If fiducial3 is initialised we can recover it by
+     * checking which side of the normalised Y axis fiducial3 falls on: if it is on the
+     * negative side the feeder body is flipped relative to the normalise convention and the
+     * offset must be negated.  When normalize=false axisY is derived directly from fiducial3
+     * so the sign is already correct and no adjustment is needed.
+     */
+    private double getEffectiveTapeCenterOffsetMm() {
+        if (!normalize || !fiducial3Location.isInitialized()
+                || !fiducial1Location.isInitialized() || !fiducial2Location.isInitialized()) {
+            return tapeCenterOffsetMm;
+        }
+        Location origin = fiducial1Location.convertToUnits(LengthUnit.Millimeters);
+        Location f2 = fiducial2Location.convertToUnits(LengthUnit.Millimeters);
+        Location f3 = fiducial3Location.convertToUnits(LengthUnit.Millimeters);
+        double dist12 = origin.getLinearDistanceTo(f2);
+        if (dist12 < 1) {
+            return tapeCenterOffsetMm;
+        }
+        // Unit vector along tape (feeder local X).
+        double axisXx = (f2.getX() - origin.getX()) / dist12;
+        double axisXy = (f2.getY() - origin.getY()) / dist12;
+        // CCW-normalised Y axis (what normalize=true always uses).
+        double normYx = -axisXy;
+        double normYy =  axisXx;
+        // Reference point: whichever of fiducial1/2 is nearer to fiducial3.
+        Location ref = f3.getLinearDistanceTo(f2) < f3.getLinearDistanceTo(origin) ? f2 : origin;
+        double f3dist = ref.getLinearDistanceTo(f3);
+        if (f3dist < 1) {
+            return tapeCenterOffsetMm;
+        }
+        double f3dx = (f3.getX() - ref.getX()) / f3dist;
+        double f3dy = (f3.getY() - ref.getY()) / f3dist;
+        // Dot product: negative means fiducial3 is on the opposite side of the normalised Y
+        // axis, i.e. the feeder body is mounted in the flipped orientation.
+        return (normYx * f3dx + normYy * f3dy) < 0 ? -tapeCenterOffsetMm : tapeCenterOffsetMm;
+    }
+
     public Location[] getOcrRegionCornerLocations(Length feederY) {
         double ocrMarginMm = Math.abs(getOcrMargin().convertToUnits(LengthUnit.Millimeters).getValue());
         double feederYMm = feederY.convertToUnits(LengthUnit.Millimeters).getValue();
-        double feederY0Mm = feederYMm 
-                + tapeCenterOffsetMm - maxLabelSizeMm*0.5;
-        double feederY1Mm = feederYMm 
-                + tapeCenterOffsetMm + maxLabelSizeMm*0.5;
+        double effectiveTapeCenterOffsetMm = getEffectiveTapeCenterOffsetMm();
+        double feederY0Mm = feederYMm
+                + effectiveTapeCenterOffsetMm - maxLabelSizeMm*0.5;
+        double feederY1Mm = feederYMm
+                + effectiveTapeCenterOffsetMm + maxLabelSizeMm*0.5;
         // Create the feeder relative ROI for OCR, i.e. in the X margin area of the feeder.
         double edgePositionMm;
         if (getOcrMargin().getValue() < 0) {
