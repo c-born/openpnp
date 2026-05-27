@@ -48,6 +48,7 @@ import org.openpnp.model.Footprint.Pad;
 public class KicadModImporter {
 
     Footprint footprint = new Footprint();
+    private static final String NUMBER_PATTERN = "([-+]?\\d*\\.?\\d+(?:[eE][-+]?\\d+)?)";
 
     public class KicadPad {
     
@@ -58,25 +59,16 @@ public class KicadModImporter {
         }
 
         String getName() {
-            Pattern p = Pattern.compile("^\\(pad\\s\"?(\\w*)\"?\\s(\\w*)\\s(\\w*)");
+            Pattern p = Pattern.compile("^\\(pad\\s+(?:\"([^\"]*)\"|([^\\s()]+))\\s+([^\\s()]+)\\s+([^\\s()]+)");
             Matcher m = p.matcher(padDefinition);
             if(m.find()) {
-                return m.group(1);
+                return m.group(1) != null ? m.group(1) : m.group(2);
             }
             return "";
         }
 
         String getType() {
-            Pattern p = Pattern.compile("^\\(pad\\s\"?(\\w*)\"?\\s(\\w*)\\s(\\w*)");
-            Matcher m = p.matcher(padDefinition);
-            if(m.find()) {
-                return m.group(2);
-            }
-            return "";
-        }
-
-        String getShape() {
-            Pattern p = Pattern.compile("^\\(pad\\s\"?(\\w*)\"?\\s(\\w*)\\s(\\w*)");
+            Pattern p = Pattern.compile("^\\(pad\\s+(?:\"([^\"]*)\"|([^\\s()]+))\\s+([^\\s()]+)\\s+([^\\s()]+)");
             Matcher m = p.matcher(padDefinition);
             if(m.find()) {
                 return m.group(3);
@@ -84,8 +76,17 @@ public class KicadModImporter {
             return "";
         }
 
+        String getShape() {
+            Pattern p = Pattern.compile("^\\(pad\\s+(?:\"([^\"]*)\"|([^\\s()]+))\\s+([^\\s()]+)\\s+([^\\s()]+)");
+            Matcher m = p.matcher(padDefinition);
+            if(m.find()) {
+                return m.group(4);
+            }
+            return "";
+        }
+
         double getWidth() {
-            Pattern p = Pattern.compile("\\(size ([\\-0-9.]*) ([\\-0-9\\.]*)\\)");
+            Pattern p = Pattern.compile("\\(size\\s+" + NUMBER_PATTERN + "\\s+" + NUMBER_PATTERN + "\\)");
             Matcher m = p.matcher(padDefinition);
             if(m.find()) {
                 return Double.parseDouble(m.group(1));
@@ -94,7 +95,7 @@ public class KicadModImporter {
         }
 
         double getHeight() {
-            Pattern p = Pattern.compile("\\(size ([\\-0-9\\.]*) ([\\-0-9\\.]*)\\)");
+            Pattern p = Pattern.compile("\\(size\\s+" + NUMBER_PATTERN + "\\s+" + NUMBER_PATTERN + "\\)");
             Matcher m = p.matcher(padDefinition);
             if(m.find()) {
                 return Double.parseDouble(m.group(2));
@@ -103,7 +104,7 @@ public class KicadModImporter {
         }
 
         double getX() {
-            Pattern p = Pattern.compile("\\(at ([\\-0-9.]*) ([\\-0-9.]*)\\s?([^\\)]*)\\)");
+            Pattern p = Pattern.compile("\\(at\\s+" + NUMBER_PATTERN + "\\s+" + NUMBER_PATTERN + "\\s*([^\\)]*)\\)");
             Matcher m = p.matcher(padDefinition);
             if(m.find()) {
                 return Double.parseDouble(m.group(1));
@@ -112,7 +113,7 @@ public class KicadModImporter {
         }
 
         double getY() {
-            Pattern p = Pattern.compile("\\(at ([\\-0-9.]*) ([\\-0-9.]*)\\s?([^\\)]*)\\)");
+            Pattern p = Pattern.compile("\\(at\\s+" + NUMBER_PATTERN + "\\s+" + NUMBER_PATTERN + "\\s*([^\\)]*)\\)");
             Matcher m = p.matcher(padDefinition);
             if(m.find()) {
                 return Double.parseDouble(m.group(2)) * (-1); // Negative because of different conventions
@@ -121,18 +122,18 @@ public class KicadModImporter {
         }
 
         double getRotation() {
-            Pattern p = Pattern.compile("\\(at ([\\-0-9.]*) ([\\-0-9.]*)\\s?([^\\)]*)\\)");
+            Pattern p = Pattern.compile("\\(at\\s+" + NUMBER_PATTERN + "\\s+" + NUMBER_PATTERN + "\\s*([^\\)]*)\\)");
             Matcher m = p.matcher(padDefinition);
             if(m.find()) {
-                if (m.group(3).length() > 0) {
-                    return Double.parseDouble(m.group(3));
+                if (m.group(3).trim().length() > 0) {
+                    return Double.parseDouble(m.group(3).trim());
                 }
             }
             return 0.;
         }
 
         double getRoundness() {
-            Pattern p = Pattern.compile("\\(roundrect_rratio ([\\-0-9.]*)\\)");
+            Pattern p = Pattern.compile("\\(roundrect_rratio\\s+" + NUMBER_PATTERN + "\\)");
             Matcher m = p.matcher(padDefinition);
             if(m.find()) {
                 return Double.parseDouble(m.group(1)) * 100;
@@ -150,6 +151,50 @@ public class KicadModImporter {
         }
     }
 
+    private static int getParenthesisBalance(String line) {
+        int balance = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (escaped) {
+                escaped = false;
+            }
+            else if (c == '\\') {
+                escaped = true;
+            }
+            else if (c == '"') {
+                inString = !inString;
+            }
+            else if (!inString && c == '(') {
+                balance++;
+            }
+            else if (!inString && c == ')') {
+                balance--;
+            }
+        }
+        return balance;
+    }
+
+    private static String readPadDefinition(BufferedReader reader, String firstLine) throws Exception {
+        StringBuilder definition = new StringBuilder(firstLine.trim());
+        int balance = getParenthesisBalance(firstLine);
+        while (balance > 0) {
+            String line = reader.readLine();
+            if (line == null) {
+                throw new Exception("Unexpected end of file while reading pad definition.");
+            }
+            definition.append(" ");
+            definition.append(line.trim());
+            balance += getParenthesisBalance(line);
+        }
+        return definition.toString();
+    }
+
+    public KicadModImporter(File file) throws Exception {
+        loadFromFile(file);
+    }
+
     public KicadModImporter() throws Exception {
         try {
             FileDialog fileDialog = new FileDialog(MainFrame.get());
@@ -165,12 +210,20 @@ public class KicadModImporter {
             }
 
             File file = new File(new File(fileDialog.getDirectory()), fileDialog.getFile());
-            BufferedReader reader = new BufferedReader(new FileReader(file));
-            
+            loadFromFile(file);
+        }
+        catch (Exception e) {
+            throw new Exception(Translations.getString("KicadModImporter.LoadFile.Fail") + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    private void loadFromFile(File file) throws Exception {
+        BufferedReader reader = new BufferedReader(new FileReader(file));
+        try {
             String line = reader.readLine();
             while (line != null) {
                 if (line.trim().startsWith("(pad ")) {
-                    KicadPad kipad = new KicadPad(line.trim());
+                    KicadPad kipad = new KicadPad(readPadDefinition(reader, line));
                     if (kipad.getType().equals("smd") && kipad.isTopCu()) {
                         Pad pad = new Pad();
                         pad.setName(kipad.getName());
@@ -200,11 +253,12 @@ public class KicadModImporter {
 
                 line = reader.readLine();
             }
-
-            reader.close();
+            if (footprint.getPads().isEmpty()) {
+                throw new Exception("No supported top-side SMD pads found in " + file.getName() + ".");
+            }
         }
-        catch (Exception e) {
-            throw new Exception(Translations.getString("KicadModImporter.LoadFile.Fail") + e.getMessage()); //$NON-NLS-1$
+        finally {
+            reader.close();
         }
     }
 
