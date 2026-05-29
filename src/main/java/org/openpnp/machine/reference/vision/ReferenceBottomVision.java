@@ -45,7 +45,10 @@ import org.openpnp.util.Utils2D;
 import org.openpnp.util.VisionUtils;
 import org.openpnp.vision.pipeline.CvPipeline;
 import org.openpnp.vision.pipeline.CvPipeline.PipelineShot;
+import org.openpnp.vision.pipeline.CvStage;
 import org.openpnp.vision.pipeline.CvStage.Result;
+import org.openpnp.vision.pipeline.stages.DetectRectlinearSymmetry;
+import org.openpnp.vision.pipeline.stages.MinAreaRect;
 import org.pmw.tinylog.Logger;
 import org.simpleframework.xml.Attribute;
 import org.simpleframework.xml.Element;
@@ -474,6 +477,7 @@ public class ReferenceBottomVision extends AbstractPartAlignment {
                     + "For more diagnostic information go to the Vision Compositing tab on package "+pkg.getId()+". ");
         }
         pipeline.resetReusedPipeline();
+        validateCompositingPipeline(pipeline, pkg, composite);
         for (Shot shot : composite.getShotsTravel()) {
             Location upp = camera.getUnitsPerPixelAtZ();
             pipeline.setProperty("camera", camera);
@@ -550,8 +554,15 @@ public class ReferenceBottomVision extends AbstractPartAlignment {
             pipeline.addProperties(pipelineParameterAssignments);
 
             // Get the shot location, but adjusted by the adjustedNozzleLocation.
-            Location shotLocation = composite.getShotLocation(shot)
-                    .addWithRotation(adjustedNozzleLocation.subtractWithRotation(wantedLocation)); 
+            Location baseShotLocation = composite.getShotLocation(shot);
+            Location adjustment = adjustedNozzleLocation.subtractWithRotation(wantedLocation);
+            Location shotLocation = baseShotLocation.addWithRotation(adjustment); 
+            Logger.info("Bottom vision shot for package "+pkg.getId()
+                    +": wanted "+wantedLocation
+                    +", adjustedNozzle "+adjustedNozzleLocation
+                    +", baseShot "+baseShotLocation
+                    +", adjustment "+adjustment
+                    +", finalShot "+shotLocation);
             pipeline.new PipelineShot() {
                 @Override
                 public void apply() throws Exception {
@@ -578,6 +589,25 @@ public class ReferenceBottomVision extends AbstractPartAlignment {
                     return new Result(null, composite.getDetectedRotatedRect());
                 }
             };
+        }
+    }
+
+    private void validateCompositingPipeline(CvPipeline pipeline, Package pkg, Composite composite) {
+        if (!composite.getCompositingSolution().isAdvanced()) {
+            return;
+        }
+        CvStage resultStage = pipeline.getStage(VisionUtils.PIPELINE_RESULTS_NAME);
+        if (resultStage == null) {
+            resultStage = pipeline.getStage("result");
+        }
+        if (resultStage != null 
+                && !(resultStage instanceof MinAreaRect)
+                && !(resultStage instanceof DetectRectlinearSymmetry)) {
+            Logger.warn("Bottom vision compositing for package "+pkg.getId()
+                    +" is using result stage "+resultStage.getClass().getSimpleName()
+                    +". Multi-shot compositing expects a partial-edge capable pipeline such as "
+                    +AbstractVisionSettings.STOCK_BOTTOM_BODY_ID+" or "
+                    +AbstractVisionSettings.STOCK_BOTTOM_RECTLINEAR_ID+".");
         }
     }
 
@@ -862,6 +892,9 @@ public class ReferenceBottomVision extends AbstractPartAlignment {
         configuration.addVisionSettings(stockBottomVisionSettings);
         BottomVisionSettings rectlinearBottomVisionSettings = createRectlinearBottomVisionSettings();
         configuration.addVisionSettings(rectlinearBottomVisionSettings);
+        BottomVisionSettings bodyBottomVisionSettings = createBottomVisionSettings(AbstractVisionSettings.STOCK_BOTTOM_BODY_ID, 
+                "- Whole Part Body Bottom Vision Settings -", createStockPipeline("Body"));
+        configuration.addVisionSettings(bodyBottomVisionSettings);
         PartSettings equivalentPartSettings = new PartSettings();
         equivalentPartSettings.setPipeline(stockBottomVisionSettings.getPipeline());
         bottomVisionSettingsHashMap.put(AbstractVisionSettings.createSettingsFingerprint(equivalentPartSettings), stockBottomVisionSettings);
