@@ -51,6 +51,12 @@ public class Footprint extends AbstractModelObject{
     private double bodyHeight;
 
     @Attribute(required = false)
+    private Double bodyX;
+
+    @Attribute(required = false)
+    private Double bodyY;
+
+    @Attribute(required = false)
     private double outerDimension;
 
     @Attribute(required = false)
@@ -84,6 +90,8 @@ public class Footprint extends AbstractModelObject{
         Pad body = new Pad();
         body.setWidth(bodyWidth);
         body.setHeight(bodyHeight);
+        body.setX(getBodyX());
+        body.setY(getBodyY());
         shape.append(body.getShape(), false);
 
         return shape;
@@ -94,6 +102,8 @@ public class Footprint extends AbstractModelObject{
         Pad body = new Pad();
         body.setWidth(bodyWidth);
         body.setHeight(bodyHeight);
+        body.setX(getBodyX());
+        body.setY(getBodyY());
         shape.append(body.getShape(), false);
         return shape;
     }
@@ -159,6 +169,26 @@ public class Footprint extends AbstractModelObject{
         Object oldValue = this.bodyHeight;
         this.bodyHeight = bodyHeight;
         firePropertyChange("bodyHeight", oldValue, bodyHeight);
+    }
+
+    public double getBodyX() {
+        return bodyX == null ? 0 : bodyX;
+    }
+
+    public void setBodyX(double bodyX) {
+        Object oldValue = this.bodyX;
+        this.bodyX = bodyX;
+        firePropertyChange("bodyX", oldValue, bodyX);
+    }
+
+    public double getBodyY() {
+        return bodyY == null ? 0 : bodyY;
+    }
+
+    public void setBodyY(double bodyY) {
+        Object oldValue = this.bodyY;
+        this.bodyY = bodyY;
+        firePropertyChange("bodyY", oldValue, bodyY);
     }
 
 
@@ -538,8 +568,33 @@ public class Footprint extends AbstractModelObject{
                 for (Pad pad : importer.getPads()) {
                     addPad(pad);
                 }
+                if (bodyWidth == 0 && bodyHeight == 0) {
+                    setBodyFromPads();
+                }
                 break;
             }
         }
+    }
+
+    public void setBodyFromPads() {
+        if (pads.isEmpty()) {
+            return;
+        }
+        double x0 = Double.POSITIVE_INFINITY;
+        double x1 = Double.NEGATIVE_INFINITY;
+        double y0 = Double.POSITIVE_INFINITY;
+        double y1 = Double.NEGATIVE_INFINITY;
+        for (Pad pad : pads) {
+            Shape shape = pad.getShape();
+            Rectangle2D bounds = shape.getBounds2D();
+            x0 = Math.min(x0, bounds.getMinX());
+            x1 = Math.max(x1, bounds.getMaxX());
+            y0 = Math.min(y0, bounds.getMinY());
+            y1 = Math.max(y1, bounds.getMaxY());
+        }
+        setBodyWidth(x1 - x0);
+        setBodyHeight(y1 - y0);
+        setBodyX((x0 + x1) / 2);
+        setBodyY((y0 + y1) / 2);
     }
 }
