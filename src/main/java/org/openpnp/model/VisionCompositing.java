@@ -31,10 +31,15 @@ import java.util.TreeSet;
 
 import org.opencv.core.RotatedRect;
 import org.openpnp.gui.support.LengthConverter;
+import org.openpnp.machine.reference.axis.ReferenceControllerAxis;
 import org.openpnp.model.Footprint.Pad;
+import org.openpnp.spi.Axis;
 import org.openpnp.spi.Camera;
+import org.openpnp.spi.ControllerAxis;
+import org.openpnp.spi.Locatable.LocationOption;
 import org.openpnp.spi.Nozzle;
 import org.openpnp.spi.NozzleTip;
+import org.openpnp.spi.base.AbstractHeadMountable;
 import org.openpnp.util.NanosecondTime;
 import org.openpnp.util.TravellingSalesman;
 import org.openpnp.util.Utils2D;
@@ -207,6 +212,21 @@ public class VisionCompositing extends AbstractModelObject{
             this.maxMaskRadius = maxMaskRadius;
             this.optional = optional;
             this.configuration = configuration;
+        }
+
+        public Shot translated(double x, double y) {
+            return new Shot(corners, this.x + x, this.y + y, width, height, 
+                    minMaskRadius, maxMaskRadius, optional, configuration);
+        }
+
+        public Shot relocated(double x, double y) {
+            return new Shot(corners, x, y, width, height, 
+                    minMaskRadius, maxMaskRadius, optional, configuration);
+        }
+
+        public Shot relocated(double x, double y, double maxMaskRadius) {
+            return new Shot(corners, x, y, width, height, 
+                    minMaskRadius, maxMaskRadius, optional, configuration);
         }
 
         public Shot(ArrayList<Corner> corners,double minMaskRadius, double maxMaskRadius,
@@ -828,6 +848,12 @@ public class VisionCompositing extends AbstractModelObject{
             Pad body = new Pad();
             body.setWidth(footprint.getBodyWidth());
             body.setHeight(footprint.getBodyHeight());
+            double bodyX = footprint.getBodyX();
+            double bodyY = footprint.getBodyY();
+            if (!compositingMethod.isBody()) {
+                body.setX(bodyX);
+                body.setY(bodyY);
+            }
             List<Pad> pads;
             if (compositingMethod.isBody()) {
                 pads = new ArrayList<>();
@@ -837,22 +863,13 @@ public class VisionCompositing extends AbstractModelObject{
                 pads = footprint.getPads();
             }
             if (pads.isEmpty() 
-                    || visionSettings.getVisionOffset().isInitialized()
                     || !camera.getRoamingRadius().isInitialized()) {
-                // No footprint, or vision offsets present, or no roaming radius set.
+                // No footprint, or no roaming radius set.
                 // Resort to classic single shot.
                 compositeShots = new ArrayList<>();
                 compositeShots.add(new Shot(null, 0, 0, 
                         maxPartDiameter, maxPartDiameter, maxPartDiameter/2, maxPartDiameter/2, false, ShotConfiguration.Unknown));
-                if (visionSettings.getVisionOffset().isInitialized()) {
-                    compositingSolution = CompositingSolution.VisionOffsets;
-                    diagnostics += visionSettings.getClass().getSimpleName()+" "+visionSettings.getName()
-                        + " has Vision Offsets "
-                        + lengthConverter.convertForward(visionSettings.getVisionOffset().getLengthX())+", "
-                        + lengthConverter.convertForward(visionSettings.getVisionOffset().getLengthY())
-                        + ", compositing unsupported. ";
-                }
-                else if (!camera.getRoamingRadius().isInitialized()) {
+                if (!camera.getRoamingRadius().isInitialized()) {
                     compositingSolution = CompositingSolution.NoCameraRoaming;
                     diagnostics += camera.getClass().getSimpleName()+" "+camera.getName()+" has no roaming radius set, compositing forbidden. ";
                 }
@@ -913,10 +930,18 @@ public class VisionCompositing extends AbstractModelObject{
 
             // By combining X, Y edges, find eligible corners, including those out in the "air".
             ArrayList<Corner> corners = new ArrayList<>();
-            findEligibleCorners(leftEdges,  bottomEdges, -1, -1, corners);
-            findEligibleCorners(leftEdges,  topEdges,    -1, +1, corners);
-            findEligibleCorners(rightEdges, bottomEdges, +1, -1, corners);
-            findEligibleCorners(rightEdges, topEdges,    +1, +1, corners);
+            if (compositingMethod.isBody()) {
+                addBodyCorner(leftEdges.first(), bottomEdges.first(), -1, -1, corners);
+                addBodyCorner(leftEdges.first(), topEdges.last(), -1, +1, corners);
+                addBodyCorner(rightEdges.last(), bottomEdges.first(), +1, -1, corners);
+                addBodyCorner(rightEdges.last(), topEdges.last(), +1, +1, corners);
+            }
+            else {
+                findEligibleCorners(leftEdges,  bottomEdges, -1, -1, corners);
+                findEligibleCorners(leftEdges,  topEdges,    -1, +1, corners);
+                findEligibleCorners(rightEdges, bottomEdges, +1, -1, corners);
+                findEligibleCorners(rightEdges, topEdges,    +1, +1, corners);
+            }
 
             // Compute the corner buddy solutions.
             ArrayList<Corner> cornerSolution = null;
@@ -969,6 +994,16 @@ public class VisionCompositing extends AbstractModelObject{
                 }
             }
             this.compositingSolution = compositeSolution;
+            if (compositingMethod.isBody() && (Math.abs(bodyX) > eps || Math.abs(bodyY) > eps)) {
+                ArrayList<Shot> translatedShots = new ArrayList<>();
+                for (Shot shot : compositeShots) {
+                    translatedShots.add(shot.translated(bodyX, bodyY));
+                }
+                compositeShots = translatedShots;
+            }
+            if (compositingMethod.isBody()) {
+                optimizeBodyShotsForReachability(bodyX, bodyY);
+            }
         }
 
         /**
@@ -1152,6 +1187,163 @@ public class VisionCompositing extends AbstractModelObject{
             }
         }
 
+        private void optimizeBodyShotsForReachability(double bodyX, double bodyY) throws Exception {
+            ArrayList<Shot> reachableShots = new ArrayList<>();
+            for (Shot shot : compositeShots) {
+                Location shotLocation = getShotLocation(shot);
+                Location adjustedLocation = getSoftLimitedNozzleLocation(shotLocation);
+                Shot adjustedShot = toShotLocation(shot, adjustedLocation);
+                adjustedShot = enlargeBodyShotMaskToFit(adjustedShot);
+                if (adjustedShot != null) {
+                    if (!locationsMatch(shotLocation, adjustedLocation)) {
+                        Logger.info("Body compositing shifted shot for package "+pkg.getId()
+                                +" from "+shotLocation+" to "+adjustedLocation+".");
+                    }
+                    reachableShots.add(adjustedShot);
+                    continue;
+                }
+                if (isNozzleMoveReachable(shotLocation)) {
+                    reachableShots.add(shot);
+                    continue;
+                }
+                adjustedShot = null;
+                double dx = bodyX - shot.getX();
+                double dy = bodyY - shot.getY();
+                double distance = Math.hypot(dx, dy);
+                if (distance > eps) {
+                    int steps = 100;
+                    for (int i = 1; i <= steps; i++) {
+                        double x = shot.getX() + dx*i/steps;
+                        double y = shot.getY() + dy*i/steps;
+                        Shot candidate = shot.relocated(x, y);
+                        if (isShotMaskValid(candidate) && isNozzleMoveReachable(getShotLocation(candidate))) {
+                            adjustedShot = candidate;
+                            Logger.info("Body compositing shifted shot for package "+pkg.getId()
+                                    +" from "+getShotLocation(shot)+" to "+getShotLocation(candidate)+".");
+                            break;
+                        }
+                    }
+                }
+                if (adjustedShot == null) {
+                    Logger.warn("Body compositing could not shift shot for package "+pkg.getId()
+                            +" from "+shotLocation+" inside soft limits while keeping the feature in view.");
+                }
+                if (adjustedShot != null) {
+                    reachableShots.add(adjustedShot);
+                }
+            }
+            compositeShots = reachableShots;
+        }
+
+        private Shot enlargeBodyShotMaskToFit(Shot shot) {
+            if (shot.corners == null) {
+                return shot;
+            }
+            double requiredRadius = shot.getMinMaskRadius();
+            for (Corner corner : shot.corners) {
+                requiredRadius = Math.max(requiredRadius, Math.hypot(corner.getX() - shot.getX(), corner.getY() - shot.getY()) + tolerance);
+            }
+            double physicalCameraViewRadius = Math.min(camera.getWidth()*upp.getX(), camera.getHeight()*upp.getY()) / 2;
+            if (requiredRadius > physicalCameraViewRadius) {
+                Logger.warn("Body compositing clamped shot for package "+pkg.getId()
+                        +" needs radius "+lengthConverter.convertForward(new Length(requiredRadius, units))
+                        +", larger than physical camera view radius "
+                        +lengthConverter.convertForward(new Length(physicalCameraViewRadius, units))
+                        +". Taking the soft-limited shot anyway.");
+                requiredRadius = physicalCameraViewRadius;
+            }
+            return shot.relocated(shot.getX(), shot.getY(), Math.max(shot.getMaxMaskRadius(), requiredRadius));
+        }
+
+        private Shot toShotLocation(Shot shot, Location location) {
+            Location delta = location.convertToUnits(units).subtractWithRotation(locationAndRotation);
+            delta = delta.rotateXy(-locationAndRotation.getRotation());
+            Location visionOffset = visionSettings.getVisionOffset().convertToUnits(units);
+            return shot.relocated(-delta.getX() - visionOffset.getX(), -delta.getY() - visionOffset.getY());
+        }
+
+        private Location getSoftLimitedNozzleLocation(Location location) throws Exception {
+            Location adjusted = location;
+            Length safeZ = nozzle.getEffectiveSafeZ();
+            if (safeZ != null) {
+                Location safeLocation = location.derive(null, null,
+                        safeZ.convertToUnits(location.getUnits()).getValue(), null);
+                Location safeAdjusted = getRawSoftLimitedNozzleLocation(safeLocation);
+                adjusted = adjusted.derive(safeAdjusted, true, true, false, true);
+            }
+            return getRawSoftLimitedNozzleLocation(adjusted);
+        }
+
+        private Location getRawSoftLimitedNozzleLocation(Location location) throws Exception {
+            if (!(nozzle instanceof AbstractHeadMountable)) {
+                return nozzle.getApproximativeLocation(nozzle.getLocation(), location,
+                        LocationOption.ApplySoftLimits);
+            }
+            AbstractHeadMountable hm = (AbstractHeadMountable) nozzle;
+            AxesLocation rawLocation = hm.toRaw(hm.toHeadLocation(location, LocationOption.Quiet), LocationOption.Quiet);
+            AxesLocation limitedRawLocation = rawLocation;
+            boolean limited = false;
+            for (ControllerAxis axis : rawLocation.getControllerAxes()) {
+                if (axis instanceof ReferenceControllerAxis) {
+                    ReferenceControllerAxis refAxis = (ReferenceControllerAxis) axis;
+                    if (refAxis.getType() == Axis.Type.Rotation) {
+                        continue;
+                    }
+                    Length coordinate = rawLocation.getLengthCoordinate(refAxis).convertToUnits(Configuration.get().getSystemUnits());
+                    if (refAxis.isSoftLimitLowEnabled()) {
+                        Length limit = refAxis.getSoftLimitLow().convertToUnits(Configuration.get().getSystemUnits());
+                        if (coordinate.getValue() < limit.getValue() && !refAxis.coordinatesMatch(limit, coordinate)) {
+                            limitedRawLocation = limitedRawLocation.put(new AxesLocation(refAxis, limit));
+                            limited = true;
+                        }
+                    }
+                    if (refAxis.isSoftLimitHighEnabled()) {
+                        Length limit = refAxis.getSoftLimitHigh().convertToUnits(Configuration.get().getSystemUnits());
+                        if (coordinate.getValue() > limit.getValue() && !refAxis.coordinatesMatch(limit, coordinate)) {
+                            limitedRawLocation = limitedRawLocation.put(new AxesLocation(refAxis, limit));
+                            limited = true;
+                        }
+                    }
+                }
+            }
+            if (limited) {
+                Location limitedLocation = hm.toHeadMountableLocation(hm.toTransformed(limitedRawLocation));
+                Logger.info("Body compositing raw soft-limit clamp for package "+pkg.getId()
+                        +": raw "+rawLocation+" limited to "+limitedRawLocation
+                        +", nozzle "+location+" to "+limitedLocation+".");
+                return limitedLocation;
+            }
+            return location;
+        }
+
+        private boolean locationsMatch(Location a, Location b) {
+            Location difference = a.convertToUnits(b.getUnits()).subtractWithRotation(b);
+            return Math.hypot(difference.getX(), difference.getY()) < 0.001
+                    && Math.abs(difference.getZ()) < 0.001
+                    && Math.abs(difference.getRotation()) < 0.001;
+        }
+
+        private boolean isNozzleMoveReachable(Location location) throws Exception {
+            if (!locationsMatch(location, getSoftLimitedNozzleLocation(location))) {
+                return false;
+            }
+            return true;
+        }
+
+        private boolean isShotMaskValid(Shot shot) {
+            if (shot.corners == null) {
+                return true;
+            }
+            double maxRadius = shot.getMaxMaskRadius() - tolerance;
+            for (Corner corner : shot.corners) {
+                double distance = Math.hypot(corner.getX() - shot.getX(), corner.getY() - shot.getY());
+                if (distance > maxRadius) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         private double requiredRoamingRadius(double xCorner, double yCorner) {
             double requiredRoamingRadius = 0;
             for (int i = 0; i < 8; i++) {
@@ -1295,6 +1487,16 @@ public class VisionCompositing extends AbstractModelObject{
             }
         }
 
+        private void addBodyCorner(double x, double y, int xSign, int ySign, ArrayList<Corner> corners) {
+            double maxRoamingRadius = camera.getRoamingRadius().convertToUnits(units).getValue();
+            if (Math.hypot(x, y) > maxRoamingRadius) {
+                outOfRoamingCandidates++;
+            }
+            else {
+                corners.add(new Corner(x, y, tolerance, cameraViewRadius, xSign, ySign));
+            }
+        }
+
         private double getPadDistance(double x, double y, Footprint.Pad pad) {
             double dx;
             if (pad.getX() - pad.getWidth()/2 > x) {
@@ -1375,7 +1577,8 @@ public class VisionCompositing extends AbstractModelObject{
         public Location getShotLocation(Shot shot) {
             // Note, we move the nozzle, not the camera, so it is inverted.
             Location location = new Location(units,
-                    -shot.getX(), -shot.getY(), 0, 0);
+                    -shot.getX() - visionSettings.getVisionOffset().convertToUnits(units).getX(),
+                    -shot.getY() - visionSettings.getVisionOffset().convertToUnits(units).getY(), 0, 0);
             location = location.rotateXy(locationAndRotation.getRotation());
             location = location.addWithRotation(locationAndRotation);
             return location;
