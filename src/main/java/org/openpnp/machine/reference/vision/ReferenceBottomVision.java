@@ -35,6 +35,7 @@ import org.openpnp.model.VisionCompositing;
 import org.openpnp.model.VisionCompositing.Composite;
 import org.openpnp.model.VisionCompositing.Shot;
 import org.openpnp.spi.Camera;
+import org.openpnp.spi.Locatable.LocationOption;
 import org.openpnp.spi.Nozzle;
 import org.openpnp.spi.NozzleTip;
 import org.openpnp.spi.PartAlignment;
@@ -123,8 +124,7 @@ public class ReferenceBottomVision extends AbstractPartAlignment {
 
         Camera camera = VisionUtils.getBottomVisionCamera();
         PartAlignmentOffset offsets;
-        if ((bottomVisionSettings.getPreRotateUsage() == PreRotateUsage.Default && preRotate)
-                || (bottomVisionSettings.getPreRotateUsage() == PreRotateUsage.AlwaysOn)) {
+        if (isPreRotateEnabled(bottomVisionSettings)) {
             offsets = findOffsetsPreRotate(part, boardLocation, placement, nozzle, camera, bottomVisionSettings);
         }
         else {
@@ -152,8 +152,7 @@ public class ReferenceBottomVision extends AbstractPartAlignment {
 
         Camera camera = VisionUtils.getBottomVisionCamera();
         double wantedAngle = 0.0;
-        if ((bottomVisionSettings.getPreRotateUsage() == PreRotateUsage.Default && preRotate)
-                || (bottomVisionSettings.getPreRotateUsage() == PreRotateUsage.AlwaysOn)) {
+        if (isPreRotateEnabled(bottomVisionSettings)) {
 
             wantedAngle = placement.getLocation().getRotation();
             if (boardLocation != null) {
@@ -164,6 +163,10 @@ public class ReferenceBottomVision extends AbstractPartAlignment {
         }
         
         Location wantedLocation = getCameraLocationAtPartHeight(part, camera, nozzle, wantedAngle);
+        if (bottomVisionSettings.getPreRotateUsage() == PreRotateUsage.Auto) {
+            wantedAngle = selectAutoPreRotateAngle(part, nozzle, camera, bottomVisionSettings, wantedLocation, wantedAngle);
+            wantedLocation = wantedLocation.derive(null, null, null, wantedAngle);
+        }
 
         return wantedLocation;
     }
@@ -216,6 +219,107 @@ public class ReferenceBottomVision extends AbstractPartAlignment {
                 .derive(null, null, null, angle);
     }
 
+    private boolean isPreRotateEnabled(BottomVisionSettings bottomVisionSettings) {
+        return (bottomVisionSettings.getPreRotateUsage() == PreRotateUsage.Default && preRotate)
+                || bottomVisionSettings.getPreRotateUsage() == PreRotateUsage.AlwaysOn
+                || bottomVisionSettings.getPreRotateUsage() == PreRotateUsage.Auto;
+    }
+
+    private double selectAutoPreRotateAngle(Part part, Nozzle nozzle, Camera camera,
+            BottomVisionSettings bottomVisionSettings, Location baseLocation, double placementAngle) throws Exception {
+        double[] candidates = new double[] { 0, 90, -90, 180 };
+        Double bestAngle = null;
+        double bestYSpan = Double.POSITIVE_INFINITY;
+        double bestTravel = Double.POSITIVE_INFINITY;
+        String rejected = "";
+        for (double candidate : candidates) {
+            double wantedAngle = Utils2D.angleNorm(placementAngle + candidate, 180.);
+            Location wantedLocation = baseLocation.derive(null, null, null, wantedAngle);
+            try {
+                VisionCompositing.Composite composite = part.getPackage().getVisionCompositing().new Composite(
+                        part.getPackage(), bottomVisionSettings, nozzle, nozzle.getNozzleTip(), camera, wantedLocation);
+                if (composite.getCompositingSolution().isInvalid()) {
+                    rejected += wantedAngle+"°: "+composite.getCompositingSolution()+". ";
+                    continue;
+                }
+                double yMin = Double.POSITIVE_INFINITY;
+                double yMax = Double.NEGATIVE_INFINITY;
+                double xMin = Double.POSITIVE_INFINITY;
+                double xMax = Double.NEGATIVE_INFINITY;
+                double travel = 0;
+                Location lastLocation = nozzle.getLocation().convertToUnits(wantedLocation.getUnits());
+                boolean reachable = true;
+                String shotDiagnostics = "";
+                for (VisionCompositing.Shot shot : composite.getShotsTravel()) {
+                    Location shotLocation = composite.getShotLocation(shot);
+                    shotDiagnostics += shotLocation+" ";
+                    if (!isNozzleMoveReachable(nozzle, shotLocation)) {
+                        rejected += wantedAngle+"°: shot "+shotLocation+" not reachable. ";
+                        reachable = false;
+                        break;
+                    }
+                    xMin = Math.min(xMin, shotLocation.getX());
+                    xMax = Math.max(xMax, shotLocation.getX());
+                    yMin = Math.min(yMin, shotLocation.getY());
+                    yMax = Math.max(yMax, shotLocation.getY());
+                    travel += lastLocation.getLinearDistanceTo(shotLocation);
+                    lastLocation = shotLocation;
+                }
+                if (!reachable) {
+                    continue;
+                }
+                double ySpan = yMax - yMin;
+                Logger.info("Auto bottom vision candidate "+wantedAngle+"° for part "+part.getId()
+                        +": x "+xMin+".."+xMax+", y "+yMin+".."+yMax+", ySpan "+ySpan
+                        +", travel "+travel+", shots "+shotDiagnostics);
+                if (bestAngle == null
+                        || ySpan < bestYSpan
+                        || (Math.abs(ySpan - bestYSpan) < 0.001 && travel < bestTravel)) {
+                    bestAngle = wantedAngle;
+                    bestYSpan = ySpan;
+                    bestTravel = travel;
+                }
+            }
+            catch (Exception e) {
+                rejected += wantedAngle+"°: "+e.getMessage()+". ";
+            }
+        }
+        if (bestAngle != null) {
+            if (Math.abs(Utils2D.angleNorm(bestAngle - placementAngle, 180.)) > 0.001) {
+                Logger.info("Auto bottom vision pre-rotate selected "+bestAngle+"° for part "+part.getId()
+                        +" instead of placement angle "+placementAngle+"°.");
+            }
+            return bestAngle;
+        }
+        Logger.warn("Auto bottom vision pre-rotate found no reachable inspection angle for part "+part.getId()
+                +". Using placement angle "+placementAngle+"°. "+rejected);
+        return placementAngle;
+    }
+
+    private boolean isNozzleMoveReachable(Nozzle nozzle, Location location) throws Exception {
+        if (!isNozzleLocationWithinSoftLimits(nozzle, location)) {
+            return false;
+        }
+        Length safeZ = nozzle.getEffectiveSafeZ();
+        if (safeZ != null) {
+            Location safeLocation = location.derive(null, null,
+                    safeZ.convertToUnits(location.getUnits()).getValue(), null);
+            if (!isNozzleLocationWithinSoftLimits(nozzle, safeLocation)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isNozzleLocationWithinSoftLimits(Nozzle nozzle, Location location) throws Exception {
+        Location approximative = nozzle.getApproximativeLocation(nozzle.getLocation(), location,
+                LocationOption.ApplySoftLimits);
+        Location difference = approximative.convertToUnits(location.getUnits()).subtract(location);
+        return Math.hypot(difference.getX(), difference.getY()) < 0.001
+                && Math.abs(difference.getZ()) < 0.001
+                && Math.abs(difference.getRotation()) < 0.001;
+    }
+
     private PartAlignmentOffset findOffsetsPreRotate(Part part, BoardLocation boardLocation,
             Placement placement, Nozzle nozzle, Camera camera, BottomVisionSettings bottomVisionSettings)
                     throws Exception {
@@ -227,6 +331,10 @@ public class ReferenceBottomVision extends AbstractPartAlignment {
         wantedAngle = Utils2D.angleNorm(wantedAngle, 180.);
         // Wanted location.
         Location wantedLocation = getCameraLocationAtPartHeight(part, camera, nozzle, wantedAngle);
+        if (bottomVisionSettings.getPreRotateUsage() == PreRotateUsage.Auto) {
+            wantedAngle = selectAutoPreRotateAngle(part, nozzle, camera, bottomVisionSettings, wantedLocation, wantedAngle);
+            wantedLocation = wantedLocation.derive(null, null, null, wantedAngle);
+        }
 
         Location nozzleLocation = wantedLocation;
         final Location center = new Location(maxLinearOffset.getUnits());
@@ -785,7 +893,7 @@ public class ReferenceBottomVision extends AbstractPartAlignment {
     }
 
     public enum PreRotateUsage {
-        Default, AlwaysOn, AlwaysOff
+        Default, AlwaysOn, AlwaysOff, Auto
     }
 
     public enum PartSizeCheckMethod {
