@@ -84,6 +84,38 @@ OpenPnP is a Swing desktop application for controlling SMT pick-and-place machin
 
 Investigate making configuration loading tolerant of unknown vision pipeline stages or parameters. A custom build can save `machine.xml` entries for new stages such as `org.openpnp.vision.pipeline.stages.DetectQrCode`; older/mainstream OpenPnP builds that do not contain the class fail while deserializing the config. Consider whether `CvPipeline` / Simple XML loading can skip unknown stages with a warning, preserve them for round-trip saving, or otherwise degrade gracefully instead of requiring users to delete configs.
 
+## Current State Notes - 2026-06-09
+
+- KiCad footprint import work is committed. Recent relevant commits:
+  - `3a2d848e Support multiline KiCad footprints`
+  - `305600c6 Infer KiCad footprint body extents`
+  - `e2ea3284 Restore nozzle rotation after alignment test`
+  - `cf1c7a82 Improve body vision compositing reachability`
+  - `4457502b Add bottom vision compositing diagnostics`
+  - `78d4b74e Add automatic bottom vision pre-rotate mode`
+- A temporary branch `PostPlacelift` was used to test hard-coded post-place dwell/lift changes in `ReferencePnpJobProcessor`. Testing showed the original SOT23 placement issue was actually caused by off-centre pick, not place/retract motion. Treat this branch/change as experimental; do not merge it unless the feature is revisited and generalized.
+- G120 bottom vision is working with shielding against stray light. Package-specific bottom vision offset that worked was X `+0.635mm`, Y `-0.08mm`; sign convention observed: positive X vision center offset moved final placement left, negative Y moved it up.
+- For tiny parts bouncing/tipping, verify pick centering first. Off-centre pick can lift the part at an angle and make the later placement/retract look faulty.
+- Bulk feeder feed-count reset is not currently exposed as a built-in multi-select UI action. A future useful UI patch would add a multi-selected feeder action that calls `setFeedCount(0)` on selected feeders supporting that property.
+
+## PandaPlacer Y Position-Loss Investigation - 2026-07-19
+
+Symptom: after a job error (No Part / No Vacuum / no available feeder) and resume, Y is "lost" and repeatedly drives into one Y hard stop (which end depends on offset direction) until killed. Operator rules out mechanical slip and collisions; machine runs at 25% speed and is watched. Firmware-side detail lives in `D:\usr_chronos\CNC\PandaPlacer\Marlin-pandaplacer\CLAUDE.md` — read both together.
+
+Audit results (both code bases):
+
+- **Homed-machine motion is fully protected, verified.** Marlin clamps every `G0/G1` in native space (`apply_motion_limits`); `G92` (used by `HOME_COMMAND` and `SET_GLOBAL_OFFSETS_COMMAND` visual homing) only shifts the reporting frame, never the clamp window. OpenPnP-side, Y axis soft limits 0..350 are enabled in machine.xml and `AbstractMotionPlanner.limitAxesLocation` *throws* on out-of-range targets — garbage coordinates cannot reach the serial port. So the crash requires Marlin's native frame to diverge from physical reality, or an unhomed controller.
+- **Prime suspect: silent controller reboot.** The PandaPlacer Marlin fork's only functional code change makes `kill()` auto-reboot the board after ~5 s (`minkill()` → `HAL_reboot()`). After reboot: position zeroed, axes unhomed, and Marlin soft endstops *do not apply to unhomed axes at all*. `NO_MOTION_BEFORE_HOMING` then refuses moves — but the refusal is `echo:Home XY first` + `ok`, which GcodeDriver counts as success, so OpenPnP continues obliviously. If the *flashed* binary lacks `NO_MOTION_BEFORE_HOMING`, post-reboot moves execute unclamped in a zeroed frame → hard-stop crashes.
+- **Pending test (user, after lawn):** reset the board, do NOT home, send `G1 Y10 F600`. Moves = flashed build has no homing gate (smoking gun). `echo:Home XYZ first` = gate present.
+- **Firmware change made (needs rebuild + reflash):** `HOME_AFTER_DEACTIVATE` enabled in the Marlin fork's `Configuration.h` — any stepper disable (`M84` in DISABLE_COMMAND, the `M84 X Y Z A B` actuator, 1800 s inactivity timeout) now requires re-home before motion. Verified compatible with the `HOME_COMMAND` macro sequence.
+- **OpenPnP change recommended (user to do):** set `home-after-enabled` to `true` (machine.xml ~line 2360, or Machine Setup → ReferenceMachine → "Home after enabled" checkbox; edit XML only with OpenPnP closed). Verified in code that this runs the full driver `HOME_COMMAND` *and* visual homing (`ReferenceHead.home()` does `visualHome` first), same as the Home button.
+- **Instrumentation ideas:** treat Marlin's boot banner `start` as an error response in GcodeDriver to surface silent reboots; keep G-code logging on; on next incident capture `M114` before re-homing and compare `Count Y` (native belief) against physically measured carriage position.
+- Ruled out: `G92`/workspace-offset defeating soft limits; spurious endstop triggers truncating moves (endstops ignored outside homing in this config); OpenPnP sending out-of-range targets; stepper-disable position drift is now mitigated by `HOME_AFTER_DEACTIVATE`.
+- Upstream Marlin refs: #23095 (trust-on-disable inconsistency), #25117 (2.1.2 stepper-ISR regression — don't blind-upgrade the 2.1.1 fork).
+- Useful G-code observations from console (older session):
+  - `M211` reports `S1 ; ON`; min Y `0.845`, max Y `352.845` (logical/shifted frame — native window is 0..352).
+  - Example `M114`: `X:94.533 Y:0.845 Z:0.000 ... Count X:15188 Y:0 Z:997` (`Count` = native steps; Y:0 here was after the clamped `G1 Y-1` test).
+
 ### Event System
 
 Guava `EventBus` is used for decoupled events (`PlacementSelectedEvent`, `BoardLocationSelectedEvent`, etc.). `MachineListener` callbacks exist for machine state changes. GUI panels subscribe to both.
