@@ -920,9 +920,17 @@ public class JobPanel extends JPanel {
     };
 
     /**
+     * Set when a job error pauses the job, so the next jobRun() — whether entered
+     * via Resume, Step, a continuation, or Stop+Start — fires the
+     * Job.ResumeAfterError scripting event before any motion resumes. Only
+     * cleared when the event actually fires.
+     */
+    private boolean resumeAfterErrorPending = false;
+
+    /**
      * Initialize the job processor and start the run thread. The run thread will run one step and
      * then either loop if the state is Running or exit if the state is Stepping.
-     * 
+     *
      * @throws Exception
      */
     public void jobStart() throws Exception {
@@ -943,6 +951,17 @@ public class JobPanel extends JPanel {
     
     public void jobRun() {
         UiUtils.submitUiMachineTask(() -> {
+            if (resumeAfterErrorPending) {
+                // The job was paused by an error and is now resuming (after the
+                // user's dialog response). Fire the scripting event on the machine
+                // task thread, before any job motion, so scripts may e.g. re-home.
+                resumeAfterErrorPending = false;
+                Logger.info("Job resuming after error: firing Job.ResumeAfterError scripting event.");
+                HashMap<String, Object> params = new HashMap<>();
+                params.put("job", job);
+                params.put("jobProcessor", jobProcessor);
+                Configuration.get().getScripting().on("Job.ResumeAfterError", params);
+            }
             // For optional motion stepping, remember the past move.
             MotionPlanner motionPlanner = Configuration.get().getMachine().getMotionPlanner();
             Motion pastMotion = motionPlanner.getLastMotion();
@@ -991,6 +1010,11 @@ public class JobPanel extends JPanel {
             else if (state == State.Stopping) {
                 setState(State.Stopped);
             }
+
+            // Any resumption or restart from here counts as a resume-after-error,
+            // until the Job.ResumeAfterError event has actually fired.
+            resumeAfterErrorPending = true;
+            Logger.info("Job paused by error: Job.ResumeAfterError will fire on next job run.");
             
             // call showError() to support exceptions with continuation
             UiUtils.showError(getTopLevelAncestor(), Translations.getString("JobPanel.JobRun.Error.ErrorBox.Title"), t); //$NON-NLS-1$
