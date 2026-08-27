@@ -119,6 +119,17 @@ public class BlindsFeeder extends ReferenceFeeder {
     @Element(required = false)
     private Length pocketSize = new Length(0, LengthUnit.Millimeters);
 
+    /**
+     * Manual override for the pocket center position within one pocket pitch, measured from the
+     * Fiducial 1 origin in feeder-local X. Leave at NaN (the default) to use the built-in
+     * convention tied to Cover Type. Needed when the physical base was printed with a different
+     * cover convention than the cover currently installed (the pocket position is baked into the
+     * 3D print at print time, see BlindsFeeder-Library.scad, and does not otherwise follow the
+     * currently selected Cover Type).
+     */
+    @Element(required = false)
+    private Length pocketDistanceOverride = new Length(Double.NaN, LengthUnit.Millimeters);
+
     @Element(required = false)
     private CvPipeline pipeline = createDefaultPipeline();
 
@@ -266,17 +277,46 @@ public class BlindsFeeder extends ReferenceFeeder {
             boolean isSmallPitch = isSmallPitch();
             setPocketCount((int)(Math.floor(tapeLength.divide(pocketPitch)))
                     + (isSmallPitch ? 1 : 0));
-            // The wanted pocket center position relative to the pocket pitch is 0.25 for blinds covers,
-            // but 0.5 for all other cover types where the part can be larger than half the pitch.  
-            double pitchRelativePosition = (coverType == CoverType.BlindsCover ? 0.25 : 0.5);
-            // Align the pocket center to the nearest sprocketPitch. Make sure to round 0.5 downwards 
-            // (hence the -0.001).
-            Length pocketAlign = sprocketPitch
-                    .multiply(Math.round(pocketPitch.multiply(pitchRelativePosition).divide(sprocketPitch) - 0.001)); 
-            // Now shift that to a mid-point between two sprocket holes (unless it is small pitch)
-            setPocketDistance(sprocketPitch.multiply(isSmallPitch ? 0.0 : 0.5)
-                    .add(pocketAlign)); 
+            if (!Double.isNaN(pocketDistanceOverride.getValue())) {
+                // The base may have been printed with a different Cover Type convention than
+                // the cover currently installed (see pocketDistanceOverride javadoc). Trust the
+                // manual override over the Cover Type based convention in that case.
+                setPocketDistance(pocketDistanceOverride.convertToUnits(location.getUnits()));
+            }
+            else {
+                try {
+                    setPocketDistance(computePocketDistanceForConvention(coverType == CoverType.BlindsCover));
+                }
+                catch (Exception e) {
+                    // Unreachable: pocketPitch.getValue() > 0.0 is already guaranteed by the
+                    // enclosing if(), which is the only condition computePocketDistanceForConvention()
+                    // checks.
+                    throw new Error(e);
+                }
+            }
         }
+    }
+
+    /**
+     * Computes the pocket center position within one pocket pitch, for either the blinds cover
+     * or the push cover print convention (see BlindsFeeder-Library.scad). This is a pure function
+     * of pocketPitch/sprocketPitch, independent of the feeder's current Cover Type.
+     */
+    public Length computePocketDistanceForConvention(boolean blindsConvention) throws Exception {
+        if (pocketPitch.getValue() <= 0.0) {
+            throw new Exception("Feeder " + getName() + ": Please set the Pocket Pitch first.");
+        }
+        boolean isSmallPitch = isSmallPitch();
+        // The wanted pocket center position relative to the pocket pitch is 0.25 for blinds covers,
+        // but 0.5 for all other cover types where the part can be larger than half the pitch.
+        double pitchRelativePosition = blindsConvention ? 0.25 : 0.5;
+        // Align the pocket center to the nearest sprocketPitch. Make sure to round 0.5 downwards
+        // (hence the -0.001).
+        Length pocketAlign = sprocketPitch
+                .multiply(Math.round(pocketPitch.multiply(pitchRelativePosition).divide(sprocketPitch) - 0.001));
+        // Now shift that to a mid-point between two sprocket holes (unless it is small pitch)
+        return sprocketPitch.multiply(isSmallPitch ? 0.0 : 0.5)
+                .add(pocketAlign);
     }
 
     public boolean isSmallPitch() {
@@ -2343,6 +2383,19 @@ public class BlindsFeeder extends ReferenceFeeder {
         Length oldValue = this.pocketSize;
         this.pocketSize = pocketSize;
         firePropertyChange("pocketSize", oldValue, pocketSize);
+    }
+
+
+    public Length getPocketDistanceOverride() {
+        return pocketDistanceOverride;
+    }
+
+
+    public void setPocketDistanceOverride(Length pocketDistanceOverride) {
+        Length oldValue = this.pocketDistanceOverride;
+        this.pocketDistanceOverride = pocketDistanceOverride;
+        firePropertyChange("pocketDistanceOverride", oldValue, pocketDistanceOverride);
+        recalculateGeometry();
     }
 
     public int getPocketCount() {

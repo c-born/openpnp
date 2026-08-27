@@ -35,6 +35,7 @@ import javax.swing.JTextField;
 import javax.swing.border.TitledBorder;
 
 import org.jdesktop.beansbinding.AutoBinding.UpdateStrategy;
+import org.jdesktop.beansbinding.Converter;
 import org.openpnp.gui.MainFrame;
 import org.openpnp.gui.components.ComponentDecorators;
 import org.openpnp.gui.support.AbstractConfigurationWizard;
@@ -65,6 +66,31 @@ import com.jgoodies.forms.layout.RowSpec;
 @SuppressWarnings("serial")
 public class BlindsFeederConfigurationWizard extends AbstractConfigurationWizard {
     private final BlindsFeeder feeder;
+
+    /**
+     * Length converter that treats a blank text field as NaN (i.e. "use the automatic
+     * convention"), and vice versa. The plain LengthConverter can't round-trip NaN: it displays
+     * it as the literal text "NaN", which then fails to parse back on Apply.
+     */
+    private static class OptionalLengthConverter extends Converter<Length, String> {
+        private final LengthConverter lengthConverter = new LengthConverter();
+
+        @Override
+        public String convertForward(Length length) {
+            if (length == null || Double.isNaN(length.getValue())) {
+                return "";
+            }
+            return lengthConverter.convertForward(length);
+        }
+
+        @Override
+        public Length convertReverse(String s) {
+            if (s == null || s.trim().isEmpty()) {
+                return new Length(Double.NaN, LengthUnit.Millimeters);
+            }
+            return lengthConverter.convertReverse(s);
+        }
+    }
 
     public BlindsFeederConfigurationWizard(BlindsFeeder feeder) {
         this.feeder = feeder;
@@ -163,6 +189,8 @@ public class BlindsFeederConfigurationWizard extends AbstractConfigurationWizard
                 ColumnSpec.decode("max(70dlu;default)"),
                 FormSpecs.DEFAULT_COLSPEC,},
                 new RowSpec[] {
+                        FormSpecs.RELATED_GAP_ROWSPEC,
+                        FormSpecs.DEFAULT_ROWSPEC,
                         FormSpecs.RELATED_GAP_ROWSPEC,
                         FormSpecs.DEFAULT_ROWSPEC,
                         FormSpecs.RELATED_GAP_ROWSPEC,
@@ -277,6 +305,26 @@ public class BlindsFeederConfigurationWizard extends AbstractConfigurationWizard
 
         btnResetFeedCount = new JButton(resetFeedCountAction);
         panelTapeSettings.add(btnResetFeedCount, "14, 12");
+
+        lblPocketDistanceOverride = new JLabel("Pocket Position Override");
+        lblPocketDistanceOverride.setToolTipText("<html>\n"
+                + "Absolute pocket-center distance from the Fiducial 1 origin, in feeder-local X,<br/>\n"
+                + "within one pocket pitch. Leave blank to use the automatic convention tied to<br/>\n"
+                + "Cover Type. Set this when the physical base was printed with a different cover<br/>\n"
+                + "convention than the cover currently installed (the pocket position is baked into<br/>\n"
+                + "the 3D print at print time, and does not otherwise follow Cover Type). Use the<br/>\n"
+                + "Fill buttons to compute the correct value for either convention.</html>");
+        panelTapeSettings.add(lblPocketDistanceOverride, "2, 14, right, default");
+
+        textFieldPocketDistanceOverride = new JTextField();
+        panelTapeSettings.add(textFieldPocketDistanceOverride, "4, 14");
+        textFieldPocketDistanceOverride.setColumns(5);
+
+        btnFillPocketDistanceBlinds = new JButton(fillPocketDistanceBlinds);
+        panelTapeSettings.add(btnFillPocketDistanceBlinds, "8, 14");
+
+        btnFillPocketDistancePush = new JButton(fillPocketDistancePush);
+        panelTapeSettings.add(btnFillPocketDistancePush, "10, 14");
 
         panelCover = new JPanel();
         panelCover.setBorder(new TitledBorder(null, "Cover Settings", TitledBorder.LEADING,
@@ -394,6 +442,8 @@ public class BlindsFeederConfigurationWizard extends AbstractConfigurationWizard
         addWrappedBinding(feeder, "pocketCenterline", textFieldPocketCenterline, "text", lengthConverter);
         addWrappedBinding(feeder, "pocketPitch", textFieldPocketPitch, "text", lengthConverter);
         addWrappedBinding(feeder, "pocketSize", textFieldPocketSize, "text", lengthConverter);
+        addWrappedBinding(feeder, "pocketDistanceOverride", textFieldPocketDistanceOverride, "text",
+                new OptionalLengthConverter());
         addWrappedBinding(feeder, "pocketCount", textFieldPocketCount, "text", intConverter);
         addWrappedBinding(feeder, "firstPocket", textFieldFirstPocket, "text", intConverter);
         addWrappedBinding(feeder, "lastPocket", textFieldLastPocket, "text", intConverter);
@@ -418,6 +468,7 @@ public class BlindsFeederConfigurationWizard extends AbstractConfigurationWizard
         ComponentDecorators.decorateWithAutoSelectAndLengthConversion(textFieldPocketCenterline);
         ComponentDecorators.decorateWithAutoSelectAndLengthConversion(textFieldPocketPitch);
         ComponentDecorators.decorateWithAutoSelectAndLengthConversion(textFieldPocketSize);
+        ComponentDecorators.decorateWithAutoSelectAndLengthConversion(textFieldPocketDistanceOverride);
         ComponentDecorators.decorateWithAutoSelectAndLengthConversion(textFieldEdgeOpeningDistance);
         ComponentDecorators.decorateWithAutoSelectAndLengthConversion(textFieldEdgeClosingDistance);
         ComponentDecorators.decorateWithAutoSelect(textFieldPushSpeed);
@@ -531,6 +582,38 @@ public class BlindsFeederConfigurationWizard extends AbstractConfigurationWizard
         }
     };
 
+    private Action fillPocketDistanceBlinds = new AbstractAction("Fill (Blinds)") {
+        {
+            putValue(Action.SHORT_DESCRIPTION,
+                    "Compute the Pocket Position Override for the Blinds Cover print convention "
+                    + "from the current Pocket Pitch, without changing Cover Type.");
+        }
+        @Override
+        public void actionPerformed(ActionEvent e) {
+            UiUtils.messageBoxOnException(() -> {
+                applyAction.actionPerformed(e);
+                Length value = feeder.computePocketDistanceForConvention(true);
+                textFieldPocketDistanceOverride.setText(new LengthConverter().convertForward(value));
+            });
+        }
+    };
+
+    private Action fillPocketDistancePush = new AbstractAction("Fill (Push)") {
+        {
+            putValue(Action.SHORT_DESCRIPTION,
+                    "Compute the Pocket Position Override for the Push Cover print convention "
+                    + "from the current Pocket Pitch, without changing Cover Type.");
+        }
+        @Override
+        public void actionPerformed(ActionEvent e) {
+            UiUtils.messageBoxOnException(() -> {
+                applyAction.actionPerformed(e);
+                Length value = feeder.computePocketDistanceForConvention(false);
+                textFieldPocketDistanceOverride.setText(new LengthConverter().convertForward(value));
+            });
+        }
+    };
+
     private Action openCover = new AbstractAction("Open Cover", Icons.lockOpenOutline) {
         {
             putValue(Action.SHORT_DESCRIPTION,
@@ -622,6 +705,10 @@ public class BlindsFeederConfigurationWizard extends AbstractConfigurationWizard
     private JTextField textFieldFeederExtent;
     private JLabel lblPocketCount;
     private JTextField textFieldPocketCount;
+    private JLabel lblPocketDistanceOverride;
+    private JTextField textFieldPocketDistanceOverride;
+    private JButton btnFillPocketDistanceBlinds;
+    private JButton btnFillPocketDistancePush;
     private JTextField textFieldLastPocket;
     private JLabel lblLastPocket;
     private JButton btnOpenCover;

@@ -164,9 +164,11 @@ public class BlindsFeederTest {
     }
 
     
+    private File workingDirectory;
+
     @BeforeEach
     private void testBlindsFeederLoadConfiguration() throws Exception {
-        File workingDirectory = Files.createTempDir();
+        workingDirectory = Files.createTempDir();
         workingDirectory = new File(workingDirectory, ".openpnp");
         System.out.println("Configuration directory: " + workingDirectory);
 
@@ -479,6 +481,65 @@ public class BlindsFeederTest {
         testAllBlindsFeederConditions(testConditions);
 
     }
-    
+
+    @Test
+    public void testPocketDistanceOverride() throws Exception {
+        Machine machine = Configuration.get().getMachine();
+
+        BlindsFeeder feeder = new BlindsFeeder();
+        machine.addFeeder(feeder);
+        feeder.setPart(Configuration.get().getPart("R-0805-10K"));
+        feeder.setPocketPitch(new Length(8.0, LengthUnit.Millimeters));
+
+        // Default Cover Type is BlindsCover -> 0.25 convention, sprocket-rounded -> 2mm for 8mm pitch.
+        feeder.getUncalibratedPickLocation(1);
+        assert (Math.abs(feeder.getPocketDistance().convertToUnits(LengthUnit.Millimeters).getValue() - 2.0) < 1e-9)
+                : "Expected default BlindsCover pocket distance of 2mm, got " + feeder.getPocketDistance();
+
+        // PushCover -> 0.5 convention, sprocket-rounded -> 6mm for 8mm pitch.
+        feeder.setCoverType(BlindsFeeder.CoverType.PushCover);
+        feeder.getUncalibratedPickLocation(1);
+        assert (Math.abs(feeder.getPocketDistance().convertToUnits(LengthUnit.Millimeters).getValue() - 6.0) < 1e-9)
+                : "Expected default PushCover pocket distance of 6mm, got " + feeder.getPocketDistance();
+
+        // Manual override wins over Cover Type, in either direction.
+        feeder.setPocketDistanceOverride(new Length(2.0, LengthUnit.Millimeters));
+        feeder.getUncalibratedPickLocation(1);
+        assert (Math.abs(feeder.getPocketDistance().convertToUnits(LengthUnit.Millimeters).getValue() - 2.0) < 1e-9)
+                : "Expected overridden pocket distance of 2mm under PushCover, got " + feeder.getPocketDistance();
+
+        feeder.setCoverType(BlindsFeeder.CoverType.BlindsCover);
+        feeder.getUncalibratedPickLocation(1);
+        assert (Math.abs(feeder.getPocketDistance().convertToUnits(LengthUnit.Millimeters).getValue() - 2.0) < 1e-9)
+                : "Expected overridden pocket distance of 2mm under BlindsCover too, got " + feeder.getPocketDistance();
+
+        // Clearing the override (back to NaN) restores the Cover Type based default.
+        feeder.setPocketDistanceOverride(new Length(Double.NaN, LengthUnit.Millimeters));
+        feeder.getUncalibratedPickLocation(1);
+        assert (Math.abs(feeder.getPocketDistance().convertToUnits(LengthUnit.Millimeters).getValue() - 2.0) < 1e-9)
+                : "Expected default BlindsCover pocket distance restored, got " + feeder.getPocketDistance();
+
+        // A NaN override must round-trip through save/load.
+        Configuration.get().save();
+        Configuration.initialize(workingDirectory);
+        Configuration.get().load();
+        BlindsFeeder reloadedFeeder = (BlindsFeeder) lastFeeder(Configuration.get().getMachine());
+        assert (Double.isNaN(reloadedFeeder.getPocketDistanceOverride().getValue()))
+                : "Expected pocketDistanceOverride to round-trip as NaN, got " + reloadedFeeder.getPocketDistanceOverride();
+
+        // A real override value must round-trip too.
+        reloadedFeeder.setPocketDistanceOverride(new Length(3.5, LengthUnit.Millimeters));
+        Configuration.get().save();
+        Configuration.initialize(workingDirectory);
+        Configuration.get().load();
+        reloadedFeeder = (BlindsFeeder) lastFeeder(Configuration.get().getMachine());
+        assert (Math.abs(reloadedFeeder.getPocketDistanceOverride().convertToUnits(LengthUnit.Millimeters).getValue() - 3.5) < 1e-9)
+                : "Expected pocketDistanceOverride to round-trip as 3.5mm, got " + reloadedFeeder.getPocketDistanceOverride();
+    }
+
+    private Feeder lastFeeder(Machine machine) {
+        List<Feeder> feeders = machine.getFeeders();
+        return feeders.get(feeders.size() - 1);
+    }
 
 }
